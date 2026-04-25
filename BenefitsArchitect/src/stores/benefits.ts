@@ -24,6 +24,11 @@ export interface ApplicantProfile {
     utilityType: "Heating/Cooling" | "Phone Only" | "None" | null;
     evidenceLog: EvidenceItem[];
     logicStep: number;
+    interviewComplete: boolean;
+    finalDetermination: string | null;
+    evidenceMemo: string | null;
+    requiredDocuments: string[];
+    prefilledApplication: string | null;
     lowBandwidthMode: boolean;
 }
 
@@ -36,6 +41,11 @@ const defaultState: ApplicantProfile = {
     utilityType: null,
     evidenceLog: [],
     logicStep: 0,
+    interviewComplete: false,
+    finalDetermination: null,
+    evidenceMemo: null,
+    requiredDocuments: [],
+    prefilledApplication: null,
     lowBandwidthMode: false,
 };
 

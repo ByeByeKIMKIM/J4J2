@@ -1,10 +1,9 @@
-import { streamText, embed, stepCountIs } from 'ai';
-import { tool } from 'ai';
+import { generateObject, generateText, embed } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { getPineconeIndex } from '$lib/pinecone';
 import { OPENAI_API_KEY } from '$env/static/private';
-import { z } from 'zod';
 import type { RequestHandler } from './$types';
+import { z } from 'zod';
 
 const openaiClient = createOpenAI({ apiKey: OPENAI_API_KEY });
 
@@ -13,8 +12,7 @@ You help applicants in either California (CalFresh) or New York (SNAP) determine
 
 ## Your Core Rules
 - You MUST follow the strict logic tree below, one step at a time.
-- You MUST use the search_policy_manual tool to retrieve the official policy text before making ANY eligibility determination.
-- You may ONLY base eligibility decisions on what the tool returns. Never invent rules.
+- You may ONLY base eligibility decisions on the provided "Policy Context" section. Never invent rules.
 - Be professional but warm. You are a trusted guide.
 
 ## Logic Tree (always in this order)
@@ -25,17 +23,24 @@ You help applicants in either California (CalFresh) or New York (SNAP) determine
 5. **Final Determination**: Based ONLY on the retrieved policy context, state whether the applicant appears to qualify. Be clear and cite the source.
 
 ## Behavior Rules
-- After each user response, call search_policy_manual with a precise query to verify the relevant rule before responding.
 - When you have all the information, provide a final eligibility summary with citations.
 - Never ask for more than one piece of information at a time.
 - Do NOT reveal your internal tool calls to the user; present information naturally.`;
 
-const searchSchema = z.object({
-	query: z.string().describe('A precise natural-language search query about the policy rule you need to verify.'),
-	state: z.enum(['CA', 'NY']).describe('The applicant state — CA for CalFresh, NY for SNAP.')
+const interviewExtractionSchema = z.object({
+	householdSize: z.number().int().positive().nullable(),
+	grossIncome: z.number().nonnegative().nullable(),
+	housingCosts: z.number().nonnegative().nullable(),
+	paysHeatingOrCoolingSeparately: z.boolean().nullable(),
+	isComplete: z.boolean()
 });
 
-type SearchInput = z.infer<typeof searchSchema>;
+const bundleSchema = z.object({
+	finalDetermination: z.string(),
+	prefilledApplication: z.string(),
+	evidenceMemo: z.string(),
+	checklist: z.array(z.string()).min(1)
+});
 
 export const POST: RequestHandler = async ({ request }) => {
 	const { messages, state } = await request.json();
@@ -44,70 +49,98 @@ export const POST: RequestHandler = async ({ request }) => {
 		return new Response(JSON.stringify({ error: 'Invalid state' }), { status: 400 });
 	}
 
-	const result = streamText({
+	const latestUserMessage = [...messages]
+		.reverse()
+		.find((msg: { role?: string; content?: string }) => msg.role === 'user')?.content;
+
+	const policyContext = await searchPolicyManual(latestUserMessage ?? 'General SNAP eligibility requirements', state);
+
+	const contextBlock = policyContext.found
+		? policyContext.chunks
+				.map(
+					(chunk) =>
+						`[${chunk.rank}] (${chunk.source}) score=${chunk.score.toFixed(3)}\n${chunk.text}`
+				)
+				.join('\n\n')
+		: `No policy chunks were retrieved for this query.\nReason: ${policyContext.message}`;
+
+	const result = await generateText({
 		model: openaiClient('gpt-4o-mini'),
-		system: SYSTEM_PROMPT,
-		messages,
-		tools: {
-			search_policy_manual: tool<SearchInput, ReturnType<typeof searchPolicyManual>>({
-				description:
-					'Search the official policy manual for the given state to retrieve relevant rules, income limits, deduction criteria, and eligibility requirements. Always call this before making an eligibility determination.',
-				inputSchema: searchSchema,
-				execute: async ({ query, state: searchState }: SearchInput) => {
-					return searchPolicyManual(query, searchState);
-				}
-			})
-		},
-		stopWhen: stepCountIs(10)
+		system: `${SYSTEM_PROMPT}\n\nPolicy Context (retrieved from vector DB):\n${contextBlock}`,
+		messages
 	});
 
-	return result.toUIMessageStreamResponse();
+	const interview = await extractInterviewState(messages);
+	const completionPercent = computeCompletionPercent(interview);
+	const bundle = interview.isComplete
+		? await buildSubmissionBundle({ messages, state, interview, policyContext: contextBlock })
+		: null;
+
+	return new Response(
+		JSON.stringify({
+			message: result.text,
+			usedPolicySearch: policyContext.found,
+			interview,
+			completionPercent,
+			bundle
+		}),
+		{ headers: { 'Content-Type': 'application/json' } }
+	);
 };
 
-// async function searchPolicyManual(query: string, searchState: 'CA' | 'NY') {
-// 	try {
-// 		const pineconeIndex = getPineconeIndex();
+async function extractInterviewState(
+	messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
+) {
+	const result = await generateObject({
+		model: openaiClient('gpt-4o-mini'),
+		schema: interviewExtractionSchema,
+		system:
+			'Extract a SNAP/CalFresh interview state from the conversation. Return null for unknown fields. Mark isComplete=true only if all 4 fields are known: householdSize, grossIncome, housingCosts, paysHeatingOrCoolingSeparately.',
+		prompt: JSON.stringify(messages)
+	});
 
-// 		// const { embedding } = await embed({
-// 		// 	model: openaiClient.embedding('text-embedding-3-small'),
-// 		// 	value: query
-// 		// });
+	return result.object;
+}
 
-// 		const { embedding } = await embed({
-// 			model: openaiClient.embedding('text-embedding-3-small', {
-// 				dimensions: 1024
-// 			}),
-// 			value: query
-// 		});
+function computeCompletionPercent(interview: z.infer<typeof interviewExtractionSchema>) {
+	let count = 0;
+	if (interview.householdSize !== null) count += 1;
+	if (interview.grossIncome !== null) count += 1;
+	if (interview.housingCosts !== null) count += 1;
+	if (interview.paysHeatingOrCoolingSeparately !== null) count += 1;
 
-// 		const results = await pineconeIndex.query({
-// 			vector: embedding,
-// 			topK: 3,
-// 			filter: { state: { $eq: searchState } },
-// 			includeMetadata: true
-// 		});
+	return Math.round((count / 4) * 100);
+}
 
-// 		if (!results.matches || results.matches.length === 0) {
-// 			return {
-// 				found: false as const,
-// 				message: 'No relevant policy text found. PDF ingestion may not have been run yet.'
-// 			};
-// 		}
+async function buildSubmissionBundle(args: {
+	messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>;
+	state: 'CA' | 'NY';
+	interview: z.infer<typeof interviewExtractionSchema>;
+	policyContext: string;
+}) {
+	const { messages, state, interview, policyContext } = args;
 
-// 		const chunks = results.matches.map((match, i) => ({
-// 			rank: i + 1,
-// 			text: (match.metadata?.text as string) ?? '',
-// 			source: (match.metadata?.label as string) ?? (match.metadata?.source as string) ?? 'Policy Manual',
-// 			docType: (match.metadata?.docType as string) ?? 'other',
-// 			score: match.score ?? 0
-// 		}));
+	const bundleResult = await generateObject({
+		model: openaiClient('gpt-4o-mini'),
+		schema: bundleSchema,
+		system: `Create a submission-ready benefits bundle for ${state === 'CA' ? 'California CalFresh' : 'New York SNAP'}.
 
-// 		return { found: true as const, state: searchState, query, chunks };
-// 	} catch (err) {
-// 		console.error('Pinecone search error:', err);
-// 		return { found: false as const, message: 'Policy search temporarily unavailable.' };
-// 	}
-// }
+Requirements:
+1) finalDetermination: short plain-English eligibility outcome based ONLY on policy context.
+2) prefilledApplication: plain text that looks like a pre-filled application section with key fields and applicant answers.
+3) evidenceMemo: short legal memo with citations to policy source labels and quoted policy snippets.
+4) checklist: personalized list of required physical documents for this applicant scenario.
+
+Never invent citations; only use information visible in policy context and conversation.`,
+		prompt: JSON.stringify({
+			interview,
+			messages,
+			policyContext
+		})
+	});
+
+	return bundleResult.object;
+}
 
 async function searchPolicyManual(query: string, searchState: 'CA' | 'NY') {
 	try {

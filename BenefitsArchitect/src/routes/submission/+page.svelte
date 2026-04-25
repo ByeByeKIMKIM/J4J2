@@ -59,15 +59,15 @@
                         </li>
                         <li class="flex justify-between">
                             <span class="{ $profile.lowBandwidthMode ? 'text-gray-400' : 'text-gray-500' }">Monthly Gross Income</span>
-                            <span class="font-medium">${$profile.monthlyIncome}</span>
+                            <span class="font-medium">${$profile.grossIncome ?? 'N/A'}</span>
                         </li>
                         <li class="flex justify-between">
                             <span class="{ $profile.lowBandwidthMode ? 'text-gray-400' : 'text-gray-500' }">Housing Costs</span>
-                            <span class="font-medium">${$profile.housingCosts}</span>
+                            <span class="font-medium">${$profile.rentMortgage ?? 'N/A'}</span>
                         </li>
                         <li class="flex justify-between">
                             <span class="{ $profile.lowBandwidthMode ? 'text-gray-400' : 'text-gray-500' }">Separate Utility Bills</span>
-                            <span class="font-medium">{$profile.hasUtilityBills ? 'Yes' : 'No'}</span>
+                            <span class="font-medium">{$profile.utilityType === 'Heating/Cooling' ? 'Yes' : 'No'}</span>
                         </li>
                     </ul>
                 </div>
@@ -77,8 +77,8 @@
                     <div class="p-4 rounded-xl flex items-start gap-3 { $profile.lowBandwidthMode ? 'border border-white' : 'bg-green-50 text-green-900 border border-green-200' }">
                         <CheckCircle class="mt-0.5 shrink-0 { $profile.lowBandwidthMode ? 'text-white' : 'text-green-600' }" />
                         <div>
-                            <p class="font-bold mb-1">Preliminary Eligibility: Met</p>
-                            <p class="text-sm opacity-90">Based on the provided data and standard deduction calculations, applicant appears to meet gross income limits for expedited processing.</p>
+                            <p class="font-bold mb-1">Preliminary Eligibility</p>
+                            <p class="text-sm opacity-90">{$profile.finalDetermination ?? 'Determination will appear after the interview is completed.'}</p>
                         </div>
                     </div>
                 </div>
@@ -87,15 +87,15 @@
             <div>
                 <h3 class="text-lg font-bold mb-6 uppercase tracking-wider border-b pb-2 { $profile.lowBandwidthMode ? 'border-white' : 'border-gray-200' }">Verified Evidence & Legal Basis</h3>
                 <div class="space-y-6">
-                    {#each $profile.evidence as item}
+                    {#each $profile.evidenceLog as item}
                         <div class="flex gap-4">
                             <div class="w-8 h-8 rounded-full flex items-center justify-center shrink-0 mt-1 { $profile.lowBandwidthMode ? 'border border-white bg-black' : 'bg-blue-100 text-blue-600' }">
                                 <span class="font-bold text-sm">✓</span>
                             </div>
                             <div>
-                                <h4 class="font-bold text-lg mb-1">{item.step}</h4>
+                                <h4 class="font-bold text-lg mb-1">{item.category}</h4>
                                 <p class="mb-2 italic { $profile.lowBandwidthMode ? 'text-gray-300' : 'text-gray-700' }">"{item.text}"</p>
-                                <p class="text-sm font-medium { $profile.lowBandwidthMode ? 'text-gray-400' : 'text-blue-600' }">Authority: {item.source}</p>
+                                <p class="text-sm font-medium { $profile.lowBandwidthMode ? 'text-gray-400' : 'text-blue-600' }">Authority: {item.citation}</p>
                             </div>
                         </div>
                     {/each}

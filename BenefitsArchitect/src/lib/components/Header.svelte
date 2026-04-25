@@ -7,7 +7,7 @@
     }
 
     function selfDestruct() {
-        profile.selfDestruct();
+        profile.nukeSession();
         window.location.href = '/';
     }
 </script>

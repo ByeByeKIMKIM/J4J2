@@ -27,6 +27,7 @@
 	},
 	"dependencies": {
 		"@ai-sdk/openai": "^3.0.53",
+		"@ai-sdk/svelte": "^4.0.168",
 		"@pinecone-database/pinecone": "^7.2.0",
 		"ai": "^6.0.168",
 		"dotenv": "^17.4.2",
