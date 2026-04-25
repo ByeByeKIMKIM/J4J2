@@ -3,7 +3,7 @@
     import { profile } from '../../stores/benefits';
     import type { EvidenceItem } from '../../stores/benefits';
 
-    let { step, text, source, query, rank, score }: EvidenceItem = $props();
+    let { category, text, citation, query, rank, score }: EvidenceItem = $props();
 
     const isRagCard = !!query;
     const confidencePct = score != null ? Math.round(score * 100) : null;
@@ -26,7 +26,7 @@
         <div class="flex-1 min-w-0">
             <span class="text-xs font-bold tracking-wider uppercase block truncate
                 {$profile.lowBandwidthMode ? 'text-gray-300' : 'text-gray-500'}">
-                {step}
+                {category}
             </span>
             {#if isRagCard && query}
                 <span class="text-xs italic mt-0.5 block truncate
@@ -55,7 +55,7 @@
     <div class="flex items-center justify-between gap-2 flex-wrap">
         <div class="inline-block px-2 py-1 rounded text-xs font-medium
             {$profile.lowBandwidthMode ? 'border border-white text-white' : 'bg-blue-50 text-blue-800 border border-blue-100'}">
-            📄 {source}
+            📄 {citation}
         </div>
         {#if rank != null}
             <span class="text-xs {$profile.lowBandwidthMode ? 'text-gray-500' : 'text-gray-400'}">

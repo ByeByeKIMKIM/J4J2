@@ -1,0 +1,26 @@
+{
+  "CA": {
+    "Income": {
+      "limit": "$2,430",
+      "text": "The Gross Income Limit for a household of 1 is 200% of the Federal Poverty Level, which is $2,430/mo in California.",
+      "citation": "CalFresh Manual 63-503"
+    },
+    "Deductions": {
+      "limit": "$600",
+      "text": "The Standard Utility Allowance (SUA) in California is approximately $600.",
+      "citation": "CalFresh Manual 63-502.36"
+    }
+  },
+  "NY": {
+    "Income": {
+      "limit": "$2,430",
+      "text": "The Gross Income Limit for a household of 1 is 200% of the Federal Poverty Level, which is $2,430/mo in New York.",
+      "citation": "NY OTDA SNAP Manual Section 5"
+    },
+    "Deductions": {
+      "limit": "$850",
+      "text": "The Standard Utility Allowance (SUA) in New York is $850+ for eligible households.",
+      "citation": "NY OTDA SNAP Manual Section 9"
+    }
+  }
+}

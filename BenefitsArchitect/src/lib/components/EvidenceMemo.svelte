@@ -16,16 +16,16 @@
     </div>
 
     <div class="flex-1 p-6 overflow-y-auto">
-        {#if $profile.evidence.length === 0}
+        {#if $profile.evidenceLog.length === 0}
             <div class="flex flex-col items-center justify-center h-full text-center opacity-50">
                 <FileText size={48} class="mb-4" />
                 <p>Waiting for interview data...</p>
             </div>
         {:else}
             <div class="space-y-4">
-                {#each $profile.evidence as item (item.id)}
+                {#each $profile.evidenceLog as item (item.id)}
                     <div class="animate-fade-in">
-                        <EvidenceCard id={item.id} step={item.step} text={item.text} source={item.source} query={item.query} rank={item.rank} score={item.score} />
+                        <EvidenceCard id={item.id} category={item.category} text={item.text} citation={item.citation} query={item.query} rank={item.rank} score={item.score} />
                     </div>
                 {/each}
                 {#if $profile.logicStep < 4}

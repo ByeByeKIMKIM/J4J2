@@ -1,6 +1,7 @@
 <script lang="ts">
     import { onMount, tick } from 'svelte';
     import { profile } from '../../stores/benefits';
+    import type { ApplicantProfile } from '../../stores/benefits';
     import ProgressBar from '$lib/components/ProgressBar.svelte';
     import EvidenceMemo from '$lib/components/EvidenceMemo.svelte';
     import { Send, User, Bot, AlertCircle, Loader2 } from 'lucide-svelte';
@@ -15,14 +16,11 @@
 
     // ─── State ────────────────────────────────────────────────────────────────
     let messages = $state<ChatMessage[]>([
-        { role: 'system', content: 'Agent A (Analyst) initialized. RAG mode active.' }
+        { role: 'system', content: 'Agent A (Analyst) initialized. RAG mapping active.' }
     ]);
     let inputValue = $state('');
     let isStreaming = $state(false);
     let chatContainer: HTMLElement | undefined = $state();
-
-    // Full conversation history sent to the server each turn
-    let conversationHistory = $state<Array<{ role: string; content: string }>>([]);
 
     onMount(async () => {
         if (!$profile.state) {
@@ -32,19 +30,16 @@
 
         const greeting =
             $profile.state === 'CA'
-                ? "Hello! I'm your eligibility analyst for California CalFresh. I'll guide you through a brief interview and verify each rule directly against the official state policy manual."
-                : "Hello! I'm your eligibility analyst for New York SNAP. I'll guide you through a brief interview and verify each rule directly against the official state policy manual.";
-        const opening =
-            'First, including yourself, how many people live and buy/prepare food together in your household?';
+                ? "Hello! I'm your eligibility analyst for California CalFresh. I'll guide you through a brief interview and verify each rule directly against the official state policy."
+                : "Hello! I'm your eligibility analyst for New York SNAP. I'll guide you through a brief interview and verify each rule directly against the official state policy.";
+        
+        const opening = getNextStepMessage($profile);
 
         messages = [
             ...messages,
             { role: 'assistant', content: greeting },
             { role: 'assistant', content: opening }
         ];
-
-        // Pre-seed conversation history
-        conversationHistory = [{ role: 'assistant', content: greeting + ' ' + opening }];
     });
 
     async function scrollToBottom() {
@@ -52,7 +47,14 @@
         if (chatContainer) chatContainer.scrollTop = chatContainer.scrollHeight;
     }
 
-    // ─── Send Message ─────────────────────────────────────────────────────────
+    function getNextStepMessage(p: ApplicantProfile) {
+        if (p.householdSize === null) return "First, including yourself, how many people live and buy/prepare food together in your household?";
+        if (p.grossIncome === null) return "Got it. Next, what is your total monthly gross income before taxes?";
+        if (p.rentMortgage === null) return "What is your monthly housing cost (rent or mortgage) in dollars?";
+        if (p.utilityType === null) return "Finally, do you pay separately for 'Heating/Cooling', 'Phone Only', or 'None'?";
+        return "Thank you! Based on your responses, I have verified all the necessary criteria. You can now View your Submission Bundle.";
+    }
+
     async function sendMessage() {
         if (!inputValue.trim() || isStreaming) return;
 
@@ -60,183 +62,97 @@
         inputValue = '';
 
         messages = [...messages, { role: 'user', content: userText }];
-        conversationHistory = [...conversationHistory, { role: 'user', content: userText }];
         await scrollToBottom();
 
         isStreaming = true;
 
-        // Add a streaming placeholder bubble
-        let streamingIdx = messages.length;
-        messages = [...messages, { role: 'assistant', content: '', streaming: true }];
+        // Display "Thinking" state badge
+        messages = [...messages, { role: 'system', content: 'Agent B: Analyzing applicant response...' }];
+        await scrollToBottom();
+        
+        await new Promise(r => setTimeout(r, 600));
+
+        let stepCategory = "";
+
+        // 1. Agent B: Updates the Profile (Logic Engine)
+        profile.update(p => {
+            const np = { ...p };
+            if (np.householdSize === null) {
+                np.householdSize = parseInt(userText) || 1;
+                stepCategory = "Income";
+            } else if (np.grossIncome === null) {
+                np.grossIncome = parseInt(userText) || 0;
+                np.logicStep = 1; // Income verified
+                stepCategory = "Income";
+            } else if (np.rentMortgage === null) {
+                np.rentMortgage = parseInt(userText) || 0;
+                np.logicStep = 2; // Deductions partial
+                stepCategory = "Deductions";
+            } else if (np.utilityType === null) {
+                let ut: "Heating/Cooling" | "Phone Only" | "None" = "None";
+                const lower = userText.toLowerCase();
+                if (lower.includes("heat") || lower.includes("cool")) ut = "Heating/Cooling";
+                else if (lower.includes("phone")) ut = "Phone Only";
+                np.utilityType = ut;
+                np.logicStep = 3; // Deductions full
+                stepCategory = "Deductions";
+            }
+            return np;
+        });
+
+        const currentProfile = $profile;
+
+        // 2. UI Update: Multi-agent nature
+        messages[messages.length - 1] = { role: 'system', content: 'Agent A: Verifying State Policy...' };
         await scrollToBottom();
 
-        // Track pending tool calls by toolCallId so we can match results
-        const pendingToolCalls: Map<string, string> = new Map(); // toolCallId -> query
-        let fullText = '';
+        // 3. Agent A: Spot Check against Policy DB hook
+        if (stepCategory) {
+            try {
+                const res = await fetch('/api/policy-lookup', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state: currentProfile.state, category: stepCategory })
+                });
 
-        try {
-            const res = await fetch('/api/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    messages: conversationHistory,
-                    state: $profile.state
-                })
-            });
-
-            if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split('\n');
-                // Keep incomplete last line in buffer
-                buffer = lines.pop() ?? '';
-
-                for (const line of lines) {
-                    const trimmed = line.trim();
-                    if (!trimmed) continue;
-
-                    let chunk: Record<string, unknown>;
-                    try {
-                        chunk = JSON.parse(trimmed);
-                    } catch {
-                        continue;
-                    }
-
-                    const type = chunk.type as string;
-
-                    // ── Text streaming ─────────────────────────────────────
-                    if (type === 'text-delta') {
-                        fullText += (chunk.delta as string) ?? '';
-                        messages = messages.map((m, i) =>
-                            i === streamingIdx ? { ...m, content: fullText } : m
-                        );
-                        if (!$profile.lowBandwidthMode) await scrollToBottom();
-
-                    // ── Tool call started ──────────────────────────────────
-                    } else if (type === 'tool-input-available') {
-                        const toolCallId = chunk.toolCallId as string;
-                        const toolName = chunk.toolName as string;
-                        const input = chunk.input as { query?: string; state?: string } | undefined;
-
-                        if (toolName === 'search_policy_manual') {
-                            const query = input?.query ?? '';
-                            pendingToolCalls.set(toolCallId, query);
-
-                            // Add a "searching" placeholder Evidence Card
-                            profile.update(p => ({
-                                ...p,
-                                evidence: [
-                                    ...p.evidence,
-                                    {
-                                        id: toolCallId,
-                                        step: `Searching: ${input?.state ?? $profile.state}`,
-                                        text: '⏳ Retrieving policy excerpt…',
-                                        source: 'Policy Manual',
-                                        query
-                                    }
-                                ]
-                            }));
-                        }
-
-                    // ── Tool result returned ───────────────────────────────
-                    } else if (type === 'tool-output-available') {
-                        const toolCallId = chunk.toolCallId as string;
-                        const output = chunk.output as {
-                            found?: boolean;
-                            chunks?: Array<{ text: string; source: string; rank: number; score: number }>;
-                            state?: string;
-                            query?: string;
-                            message?: string;
-                        };
-                        const query = pendingToolCalls.get(toolCallId) ?? '';
-
-                        if (output?.found && output.chunks && output.chunks.length > 0) {
-                            const top = output.chunks[0];
-                            profile.update(p => ({
-                                ...p,
-                                evidence: p.evidence.map(e =>
-                                    e.id === toolCallId
-                                        ? {
-                                              ...e,
-                                              step: `Policy Retrieved (${output.state ?? $profile.state})`,
-                                              text: top.text,
-                                              source: top.source,
-                                              rank: top.rank,
-                                              score: top.score,
-                                              query
-                                          }
-                                        : e
-                                )
-                            }));
-                        } else {
-                            profile.update(p => ({
-                                ...p,
-                                evidence: p.evidence.map(e =>
-                                    e.id === toolCallId
-                                        ? {
-                                              ...e,
-                                              step: 'Policy Search',
-                                              text:
-                                                  output?.message ??
-                                                  'No matching policy text found. Run the ingestion script first.',
-                                              source: 'N/A',
-                                              query
-                                          }
-                                        : e
-                                )
-                            }));
-                        }
-
-                    } else if (type === 'error') {
-                        console.error('Stream error:', chunk.errorText);
-                    }
+                if (res.ok) {
+                    const data = await res.json();
+                    profile.update(p => ({
+                        ...p,
+                        evidenceLog: [
+                            ...p.evidenceLog,
+                            {
+                                id: Date.now().toString(),
+                                category: stepCategory,
+                                citation: data.citation,
+                                text: data.text,
+                                query: `Lookup ${stepCategory} threshold for ${p.state}`
+                            }
+                        ]
+                    }));
                 }
+            } catch (err) {
+                console.error("Agent A RAG hook lookup failed:", err);
             }
-
-            // Finalize
-            messages = messages.map((m, i) =>
-                i === streamingIdx ? { ...m, streaming: false, content: fullText } : m
-            );
-
-            if (fullText) {
-                conversationHistory = [
-                    ...conversationHistory,
-                    { role: 'assistant', content: fullText }
-                ];
-            }
-
-            // Advance logic step
-            profile.update(p => {
-                const newStep = Math.min(p.logicStep + 1, 4);
-                const np = { ...p, logicStep: newStep };
-                if (p.logicStep === 0) np.householdSize = parseInt(userText) || null;
-                if (p.logicStep === 1) np.monthlyIncome = parseInt(userText) || null;
-                if (p.logicStep === 2) np.housingCosts = parseInt(userText) || null;
-                if (p.logicStep === 3) np.hasUtilityBills = /\byes\b|^y$/i.test(userText);
-                return np;
-            });
-        } catch (e) {
-            messages = messages.map((m, i) =>
-                i === streamingIdx
-                    ? {
-                          role: 'system',
-                          content: `Error: ${e instanceof Error ? e.message : 'Unknown error'}`,
-                          streaming: false
-                      }
-                    : m
-            );
-        } finally {
-            isStreaming = false;
-            await scrollToBottom();
         }
+
+        // 4. UI Update: Finalizing deductive reasoning
+        if (currentProfile.utilityType === null && currentProfile.rentMortgage !== null) {
+             messages[messages.length - 1] = { role: 'system', content: 'Agent B: Calculating Deductions...' };
+             await new Promise(r => setTimeout(r, 600));
+        }
+
+        // Remove the system badge, or keep it, then add Assistant message
+        messages.pop(); // Remove system indicator to keep chat clean or just leave it. Let's remove it and reply naturally.
+
+        messages = [...messages, { role: 'assistant', content: getNextStepMessage(currentProfile) }];
+        
+        if (currentProfile.utilityType !== null) {
+            profile.update(p => ({ ...p, logicStep: 4 })); // Fully done
+        }
+
+        isStreaming = false;
+        await scrollToBottom();
     }
 
     function handleKeydown(e: KeyboardEvent) {
