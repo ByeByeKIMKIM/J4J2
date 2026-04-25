@@ -1,16 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
 import dotenv from 'dotenv';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { createOpenAI } from '@ai-sdk/openai';
 import { embedMany } from 'ai';
+import pdfParseRaw from 'pdf-parse';
 
-// pdf-parse is CJS-only — use createRequire for ESM compatibility
-const require = createRequire(import.meta.url);
-const pdfParseRaw = require('pdf-parse');
-const pdfParse = (pdfParseRaw.default ?? pdfParseRaw) as (
+const pdfParse = (typeof pdfParseRaw === 'function' ? pdfParseRaw : (pdfParseRaw as any).default || pdfParseRaw) as (
 	buf: Buffer
 ) => Promise<{ text: string; numpages: number }>;
 
