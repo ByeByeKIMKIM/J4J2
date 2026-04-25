@@ -182,29 +182,94 @@ async function processPdf(
 
 		// Embed the "Child text" for precision matching
 		const { embeddings } = await embedMany({
-			model: openai.embedding('text-embedding-3-small'),
+			model: openai.embedding('text-embedding-3-small', {
+				dimensions: 1024
+			}),
 			values: batch.map(c => c.childText)
 		});
 
-		const vectors = batch.map((chunkInfo, idx) => ({
-			id: `${doc.state}-${doc.docType}-${doc.file.replace('.pdf', '')}-pdr-${i + idx}`,
-			values: embeddings[idx],
-			metadata: {
-				state: doc.state,
-				docType: doc.docType,
-				label: doc.label,
-				source: doc.file,
-				// PARENT DOCUMENT RETRIEVAL:
-				// The LLM receives the large 'parentText' for complete context,
-				// but Pinecone retrieved it using the highly-specific 'childText' embedding.
-				text: chunkInfo.parentText,
-				childTextMatch: chunkInfo.childText // For debugging 
-			}
-		}));
+		if (!embeddings || embeddings.length === 0) {
+			console.error("\n❌ embedMany returned an empty or undefined embeddings array!");
+			process.exit(1);
+		}
 
-		await index.upsert(vectors);
-		totalUpserted += vectors.length;
-		console.log(`✅ ${vectors.length} vectors upserted`);
+		const vectors = batch.map((chunkInfo, idx) => {
+			const rawEmbedding = embeddings[idx];
+			
+			// Extract the embedding values
+			let vectorValues = Array.isArray(rawEmbedding) 
+				? rawEmbedding 
+				: (rawEmbedding as any)?.embedding || rawEmbedding;
+
+			// FIX 1: Force a standard JavaScript Array. 
+			// Vercel AI SDK returns Float32Arrays which fail Pinecone's Array.isArray() check.
+			if (vectorValues && !Array.isArray(vectorValues)) {
+				vectorValues = Array.from(vectorValues);
+			}
+
+			// FIX 1.5: Explicitly enforce dimension restriction.
+			// The OpenAI SDK sometimes ignores the { dimensions: 1024 } parameter and returns full 1536.
+			// v3 embeddings are explicitly designed to be safely truncated.
+			if (vectorValues && vectorValues.length > 1024) {
+				vectorValues = vectorValues.slice(0, 1024);
+			}
+
+			if (!vectorValues || !Array.isArray(vectorValues)) {
+				console.error(`\n❌ Failed to extract vector values at index ${idx}`);
+				console.log("Raw embedding structure:", JSON.stringify(rawEmbedding, null, 2));
+				process.exit(1);
+			}
+			
+			// FIX 2: Strip null bytes. 
+			// pdf-parse leaves \u0000 characters which cause Pinecone to instantly drop the record.
+			const sanitizeString = (str: string) => str.replace(/\0/g, '').trim();
+			
+			return {
+				id: `${doc.state}-${doc.docType}-${doc.file.replace('.pdf', '').replace(/[^a-zA-Z0-9]/g, '_')}-pdr-${i + idx}`,
+				values: vectorValues,
+				metadata: {
+					state: doc.state,
+					docType: doc.docType,
+					label: doc.label,
+					source: doc.file,
+					text: sanitizeString(chunkInfo.parentText),
+					childTextMatch: sanitizeString(chunkInfo.childText)
+				}
+			};
+		});
+
+		if (vectors.length > 0) {
+			console.log(`   Preparing to upsert ${vectors.length} vectors. First ID: ${vectors[0].id}`);
+			
+			// 1. STRICT BATCH VALIDATION 
+			const invalidRecords = vectors.filter(v => 
+				!v.id || 
+				!Array.isArray(v.values) || 
+				v.values.length !== 1024 || // Matched to Pinecone Index Dimensions
+				v.values.some(val => isNaN(val) || val == null)
+			);
+
+			if (invalidRecords.length > 0) {
+				console.error(`\n❌ Found ${invalidRecords.length} invalid records in batch!`);
+				const firstInvalid = vectors.indexOf(invalidRecords[0]);
+				console.log("   First invalid at index:", firstInvalid);
+				console.dir(vectors[firstInvalid], { depth: 1 });
+				process.exit(1);
+			}
+
+			try {
+				await index.upsert({ records: vectors });
+				totalUpserted += vectors.length;
+				console.log(`✅ ${vectors.length} vectors upserted`);
+			} catch (err: any) {
+				console.error("\n❌ Pinecone Upsert Failed!");
+				console.error("Error Message:", err.message);
+				process.exit(1);
+			}
+		} else {
+			console.error("\n❌ Vectors array is empty before upsert.");
+			process.exit(1);
+		}
 	}
 
 	return totalUpserted;
