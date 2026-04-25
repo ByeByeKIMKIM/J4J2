@@ -64,17 +64,67 @@ export const POST: RequestHandler = async ({ request }) => {
 	return result.toUIMessageStreamResponse();
 };
 
+// async function searchPolicyManual(query: string, searchState: 'CA' | 'NY') {
+// 	try {
+// 		const pineconeIndex = getPineconeIndex();
+
+// 		// const { embedding } = await embed({
+// 		// 	model: openaiClient.embedding('text-embedding-3-small'),
+// 		// 	value: query
+// 		// });
+
+// 		const { embedding } = await embed({
+// 			model: openaiClient.embedding('text-embedding-3-small', {
+// 				dimensions: 1024
+// 			}),
+// 			value: query
+// 		});
+
+// 		const results = await pineconeIndex.query({
+// 			vector: embedding,
+// 			topK: 3,
+// 			filter: { state: { $eq: searchState } },
+// 			includeMetadata: true
+// 		});
+
+// 		if (!results.matches || results.matches.length === 0) {
+// 			return {
+// 				found: false as const,
+// 				message: 'No relevant policy text found. PDF ingestion may not have been run yet.'
+// 			};
+// 		}
+
+// 		const chunks = results.matches.map((match, i) => ({
+// 			rank: i + 1,
+// 			text: (match.metadata?.text as string) ?? '',
+// 			source: (match.metadata?.label as string) ?? (match.metadata?.source as string) ?? 'Policy Manual',
+// 			docType: (match.metadata?.docType as string) ?? 'other',
+// 			score: match.score ?? 0
+// 		}));
+
+// 		return { found: true as const, state: searchState, query, chunks };
+// 	} catch (err) {
+// 		console.error('Pinecone search error:', err);
+// 		return { found: false as const, message: 'Policy search temporarily unavailable.' };
+// 	}
+// }
+
 async function searchPolicyManual(query: string, searchState: 'CA' | 'NY') {
 	try {
 		const pineconeIndex = getPineconeIndex();
 
+		// 1. Get the embedding normally (might return 1536 dimensions)
 		const { embedding } = await embed({
 			model: openaiClient.embedding('text-embedding-3-small'),
 			value: query
 		});
 
+		// 2. Manually slice the array down to 1024 dimensions if it's too large
+		const searchVector = embedding.length > 1024 ? embedding.slice(0, 1024) : embedding;
+
+		// 3. Send the guaranteed 1024-dimension vector to Pinecone
 		const results = await pineconeIndex.query({
-			vector: embedding,
+			vector: searchVector,
 			topK: 3,
 			filter: { state: { $eq: searchState } },
 			includeMetadata: true
