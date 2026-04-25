@@ -10,7 +10,6 @@ import { embedMany } from 'ai';
 // pdf-parse is CJS-only — use createRequire for ESM compatibility
 const require = createRequire(import.meta.url);
 const pdfParseRaw = require('pdf-parse');
-// Handle both `module.exports = fn` and `module.exports.default = fn`
 const pdfParse = (pdfParseRaw.default ?? pdfParseRaw) as (
 	buf: Buffer
 ) => Promise<{ text: string; numpages: number }>;
@@ -24,6 +23,7 @@ const ROOT_DIR = path.resolve(__dirname, '..');
 const PINECONE_API_KEY = process.env.PINECONE_API_KEY!;
 const PINECONE_INDEX_NAME = process.env.PINECONE_INDEX_NAME!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;
+const UNSTRUCTURED_API_KEY = process.env.UNSTRUCTURED_API_KEY; // Optional, but recommended
 
 if (!PINECONE_API_KEY || !PINECONE_INDEX_NAME || !OPENAI_API_KEY) {
 	console.error('❌ Missing required environment variables. Check your .env file.');
@@ -31,20 +31,16 @@ if (!PINECONE_API_KEY || !PINECONE_INDEX_NAME || !OPENAI_API_KEY) {
 }
 
 // ── Document Config ──────────────────────────────────────────────────────────
-// Add any PDF here — just specify state, docType, and filename.
-// docType is stored as metadata and helps the AI distinguish source types.
-
 type DocType = 'policy_manual' | 'application_form' | 'reference_guide' | 'other';
 
 interface PdfDoc {
-	file: string;       // filename inside data/pdfs/
+	file: string;
 	state: 'CA' | 'NY';
 	docType: DocType;
-	label: string;      // human-readable label for logging & evidence cards
+	label: string;
 }
 
 const DOCUMENTS: PdfDoc[] = [
-	// ── New York SNAP ──────────────────────────────────────────────────────
 	{
 		file: 'snapsb.pdf',
 		state: 'NY',
@@ -62,27 +58,98 @@ const DOCUMENTS: PdfDoc[] = [
 		state: 'NY',
 		docType: 'application_form',
 		label: 'NY SNAP Application Form (DSS-4826-DD)'
-	},
-
-	// ── California CalFresh ────────────────────────────────────────────────
-	// Add your CA PDF(s) here when ready, for example:
-	// { file: 'ca-calfresh.pdf', state: 'CA', docType: 'policy_manual', label: 'CA CalFresh Manual' },
+	}
 ];
 
-// ── Chunking config ──────────────────────────────────────────────────────────
-const CHUNK_SIZE = 1000;
-const OVERLAP = 200;
-const EMBED_BATCH = 96; // stay well under OpenAI's 2048 limit
+// ── Parent Document Chunking Strategy ────────────────────────────────────────
+const PARENT_CHUNK_SIZE = 1500;
+const CHILD_CHUNK_SIZE = 300;
+const CHILD_OVERLAP = 50;
+const EMBED_BATCH = 96;
 
-function chunkText(text: string): string[] {
-	const chunks: string[] = [];
+interface ChunkPair {
+	parentText: string;
+	childText: string;
+}
+
+function createParentChildChunks(fullText: string): ChunkPair[] {
+	const chunks: ChunkPair[] = [];
 	let i = 0;
-	while (i < text.length) {
-		const chunk = text.slice(i, i + CHUNK_SIZE).trim();
-		if (chunk.length > 60) chunks.push(chunk); // skip near-empty chunks
-		i += CHUNK_SIZE - OVERLAP;
+	
+	// Tier 1: Parent Document (context)
+	while (i < fullText.length) {
+		let parent = fullText.slice(i, i + PARENT_CHUNK_SIZE).trim();
+		// Try to snap to the nearest paragraph or sentence end
+		const nextNewline = fullText.indexOf('\n\n', i + PARENT_CHUNK_SIZE);
+		if (nextNewline !== -1 && nextNewline - (i + PARENT_CHUNK_SIZE) < 300) {
+			parent = fullText.slice(i, nextNewline).trim();
+			i = nextNewline;
+		} else {
+			i += PARENT_CHUNK_SIZE;
+		}
+
+		if (parent.length > 100) {
+			// Tier 2: Child Document (for precise embeddings)
+			let j = 0;
+			while (j < parent.length) {
+				const child = parent.slice(j, j + CHILD_CHUNK_SIZE).trim();
+				if (child.length > 40) {
+					chunks.push({ parentText: parent, childText: child });
+				}
+				j += (CHILD_CHUNK_SIZE - CHILD_OVERLAP);
+			}
+		}
 	}
 	return chunks;
+}
+
+// ── Extract PDF Content ──────────────────────────────────────────────────────
+async function extractText(filePath: string): Promise<string> {
+	if (UNSTRUCTURED_API_KEY) {
+		console.log(`   ⚡ Using Unstructured.io API for high-fidelity extraction...`);
+		try {
+			const formData = new FormData();
+			const fileBuffer = fs.readFileSync(filePath);
+			// Wrap in Blob for Fetch API FormData
+			const blob = new Blob([fileBuffer], { type: 'application/pdf' });
+			formData.append('files', blob, path.basename(filePath));
+			formData.append('strategy', 'fast'); // Use 'hi_res' if tables get too complex
+			
+			const res = await fetch('https://api.unstructuredapp.io/general/v0/general', {
+				method: 'POST',
+				headers: {
+					'accept': 'application/json',
+					'unstructured-api-key': UNSTRUCTURED_API_KEY,
+				},
+				// node-fetch / undici FormData is supported here natively in Node 18+
+				body: formData as any
+			});
+
+			if (!res.ok) throw new Error(`Unstructured HTTP ${res.status}`);
+			const elements: Array<{ type: string; text: string }> = await res.json();
+			
+			// Reconstruct text intelligently
+			return elements.map(e => {
+				if (e.type === 'Title') return `\n\n# ${e.text}\n`;
+				if (e.type === 'ListItem') return `- ${e.text}`;
+				if (e.type === 'Table') return `\n[TABLE DATA]\n${e.text}\n[/TABLE DATA]\n`;
+				return e.text;
+			}).join('\n').trim();
+		} catch (err) {
+			console.warn(`   ⚠️  Unstructured API failed, falling back to pdf-parse. Error:`, err);
+		}
+	}
+
+	// Fallback to pdf-parse
+	console.log(`   📄 Using pdf-parse (fallback)...`);
+	const dataBuffer = fs.readFileSync(filePath);
+	const data = await pdfParse(dataBuffer);
+	return data.text
+		.replace(/\f/g, ' ')
+		.replace(/\r\n|\r/g, '\n')
+		.replace(/[ \t]{2,}/g, ' ')
+		.replace(/\n{3,}/g, '\n\n')
+		.trim();
 }
 
 // ── Process one PDF ──────────────────────────────────────────────────────────
@@ -99,26 +166,15 @@ async function processPdf(
 	}
 
 	console.log(`\n📄 [${doc.state}] ${doc.label}`);
-	console.log(`   File: ${doc.file}`);
-
-	const dataBuffer = fs.readFileSync(filePath);
-	const data = await pdfParse(dataBuffer);
-
-	// Normalize whitespace
-	const text = data.text
-		.replace(/\f/g, ' ')        // form feed → space
-		.replace(/\r\n|\r/g, '\n')  // normalize line endings
-		.replace(/[ \t]{2,}/g, ' ') // collapse horizontal whitespace
-		.replace(/\n{3,}/g, '\n\n') // collapse blank lines
-		.trim();
+	const text = await extractText(filePath);
 
 	if (!text) {
-		console.warn(`   ⚠️  No text extracted — is this a scanned PDF?`);
+		console.warn(`   ⚠️  No text extracted.`);
 		return 0;
 	}
 
-	const chunks = chunkText(text);
-	console.log(`   Pages: ${data.numpages} | Chunks: ${chunks.length}`);
+	const chunks = createParentChildChunks(text);
+	console.log(`   Generated ${chunks.length} child vectors (Parent Document Retrieval Strategy)`);
 
 	let totalUpserted = 0;
 	const totalBatches = Math.ceil(chunks.length / EMBED_BATCH);
@@ -128,20 +184,25 @@ async function processPdf(
 		const batchNum = Math.floor(i / EMBED_BATCH) + 1;
 		process.stdout.write(`   Embedding batch ${batchNum}/${totalBatches}… `);
 
+		// Embed the "Child text" for precision matching
 		const { embeddings } = await embedMany({
 			model: openai.embedding('text-embedding-3-small'),
-			values: batch
+			values: batch.map(c => c.childText)
 		});
 
-		const vectors = batch.map((chunkText, idx) => ({
-			id: `${doc.state}-${doc.docType}-${doc.file.replace('.pdf', '')}-${i + idx}`,
+		const vectors = batch.map((chunkInfo, idx) => ({
+			id: `${doc.state}-${doc.docType}-${doc.file.replace('.pdf', '')}-pdr-${i + idx}`,
 			values: embeddings[idx],
 			metadata: {
 				state: doc.state,
 				docType: doc.docType,
 				label: doc.label,
 				source: doc.file,
-				text: chunkText
+				// PARENT DOCUMENT RETRIEVAL:
+				// The LLM receives the large 'parentText' for complete context,
+				// but Pinecone retrieved it using the highly-specific 'childText' embedding.
+				text: chunkInfo.parentText,
+				childTextMatch: chunkInfo.childText // For debugging 
 			}
 		}));
 
@@ -155,10 +216,9 @@ async function processPdf(
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
-	console.log('🚀 Benefits Architect — Ingestion Pipeline');
+	console.log('🚀 Benefits Architect — Ingestion Pipeline (v2 - Parent Doc Retrieval)');
 	console.log(`   Index: "${PINECONE_INDEX_NAME}"`);
-	console.log(`   Documents to process: ${DOCUMENTS.length}\n`);
-
+	
 	const pc = new Pinecone({ apiKey: PINECONE_API_KEY });
 	const index = pc.Index(PINECONE_INDEX_NAME);
 	const openai = createOpenAI({ apiKey: OPENAI_API_KEY });
@@ -176,7 +236,7 @@ async function main() {
 	console.log('🎉 Ingestion complete!\n');
 	for (const [label, count] of Object.entries(results)) {
 		const status = count > 0 ? '✅' : '⚠️ ';
-		console.log(`   ${status} ${label}: ${count} vectors`);
+		console.log(`   ${status} ${label}: ${count} vectors (Parent Document Retrieval mappings)`);
 	}
 	console.log(`\n   Total vectors upserted: ${grandTotal}`);
 	console.log(`   Index: "${PINECONE_INDEX_NAME}"`);
