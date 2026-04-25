@@ -5,11 +5,7 @@ import dotenv from 'dotenv';
 import { Pinecone } from '@pinecone-database/pinecone';
 import { createOpenAI } from '@ai-sdk/openai';
 import { embedMany } from 'ai';
-import pdfParseRaw from 'pdf-parse';
-
-const pdfParse = (typeof pdfParseRaw === 'function' ? pdfParseRaw : (pdfParseRaw as any).default || pdfParseRaw) as (
-	buf: Buffer
-) => Promise<{ text: string; numpages: number }>;
+import { PDFParse } from 'pdf-parse';
 
 dotenv.config();
 
@@ -140,8 +136,11 @@ async function extractText(filePath: string): Promise<string> {
 	// Fallback to pdf-parse
 	console.log(`   📄 Using pdf-parse (fallback)...`);
 	const dataBuffer = fs.readFileSync(filePath);
-	const data = await pdfParse(dataBuffer);
-	return data.text
+	
+	const parser = new PDFParse({ data: dataBuffer });
+	const result = await parser.getText();
+	
+	return result.text
 		.replace(/\f/g, ' ')
 		.replace(/\r\n|\r/g, '\n')
 		.replace(/[ \t]{2,}/g, ' ')
